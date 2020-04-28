@@ -1,0 +1,92 @@
+## Login to Stinger
+ssh username@stinger.wvstateu.edu
+
+## Load necessary modules (Trim_galore, CutAdapt, Fastqc, and Qiime)
+module load bio/processing/trim_galore/0.4.4 bio/processing/cutadapt/1.2.1 bio/ngs/quality/FastQC/0.11.3 bio/meta/qiime_software/1.8.0 bio/alignment/usearch/6.1.544
+
+## Install FLASH (if not installed already)
+mkdir ~/my_utils
+curl http://ccb.jhu.edu/software/FLASH/FLASH-1.2.11-Linux-x86_64.tar.gz -o ~/my_utils/FLASH-1.2.11.tar.gz
+
+tar -xf ~/my_utils/FLASH-1.2.11.tar.gz FLASH-1.2.11-Linux-x86_64/flash
+mv ~/my_utils/FLASH-1.2.11-Linux-x86_64/flash ~/my_utils
+export PATH=$PATH:~/my_utils/
+
+
+########## PREPROCESSING ##########
+
+## JOINING PAIR ENDS
+## Assuming your raw files are already in Stinger
+flash sample1_file_R1.fastq.gz sample1_file_R2.fastq.gz -o sample1
+
+
+
+## QUALITY FILTERING AND ADAPTER REMOVAL
+## Do quality filtering with trim_galore. The length parameter discards sequences shorter than this threshold. Change length to 0 in order to disable this feature.
+trim_galore --fastqc --length 350 sample1.extendedFrags.fastq
+
+## OPTIONAL, Manual filtering sequences by length, replace "sample1" according to your samples and replace 350 as needed.
+cat sample1.extendedFrags.fastq | paste - - - - | gawk 'length($3) >= 350' | sed 's/\t/\n/g' > filtered.fq
+
+## Split fastq into fasta and qual files.
+convert_fastaqual_fastq.py -c fastq_to_fastaqual -f sample1.extendedFrags.fastq -o sample1_split
+
+## Reformat fasta headers to avoid trouble in the future
+sed -i ’s/:/_/g’ sample1_split/sample1.fasta
+sed -i ’s/>/>sample1_/g’ sample1_split/sample1.fasta
+
+## CHECK FOR CHIMERIC SEQUENCES
+## Change working directory
+cd sample1_split
+
+## Download and uncompress greengenes database
+curl -O http://greengenes.lbl.gov/Download/Sequence_Data/Fasta_data_files/Caporaso_Reference_OTUs/gg_otus_4feb2011.tgz
+
+tar -zxvf gg_otus_4feb2011.tgz -C gg_otus_4feb2011/rep_set/gg_97_otus_4feb2011.fasta
+
+## Check for chimeras and filter out chimeric sequences
+identify_chimeric_seqs.py -i sample1_split/sample1.fasta -m usearch61 -o sample1_split/usearch61_chimera -r gg_otus_4feb2011/rep_set/gg_97_otus_4feb2011.fasta
+
+filter_fasta.py -f sample1_split/sample1.fasta -o sample1_split/sample1_nonChimeric.fasta -s sample1_split/usearch61_chimera/chimeras.txt -n
+
+## Join all sequences from the samples to be processed together
+cat sample1_split/sample1_nonChimeric.fasta sample2_split/sample2_nonChimeric.fasta sample3_split/sample3_nonChimeric.fasta > all_my_samples.fasta
+
+
+########## PROCESSING ##########
+
+## Pick OTUs 97%
+pick_de_novo_otus.py -i all_my_samples.fasta -o otus97
+
+## Summarize biom table and convert it to txt for further processing
+biom summarize-table -i otus97/otu_table.biom -o otus97/otu_table_biom_summary.txt
+biom convert -i otus97/otu_table.biom -o otus97/otu_table.txt -b
+
+## Create an empty mapping file
+cat > map.txt
+
+## Add the following tab-delimited content to the map file, at the end press ctrl+c
+## More details on creating a map at http://qiime.org/documentation/file_formats.html#metadata-mapping-files
+## Another example of mapping file at http://qiime.org/_static/Examples/File_Formats/Example_Mapping_File.txt
+
+#SampleID	BarcodeSequence	LinkerPrimerSequence	Treatment	Description
+#Example mapping file for the QIIME analysis package for Dr. Huber's Lab.
+sample1			treatment_a	description_aa
+sample2			treatment_b	description_bb
+sample3			treatment_c	description_cc
+
+
+## Make taxonomy bar graphs
+summarize_taxa_through_plots.py -i otus97/otu_table.biom -o otus97/taxa_summary -m map.txt
+
+## Create empty “alpha_params.txt”
+cat > alpha_params.txt
+
+## Add the following to “parameters.txt”. Press ctrl+c to close and save.
+alpha_diversity:metrics ACE, berger_parker_d, brillouin_d, chao1, chao1_confidence, dominance, doubles, enspie, equitability, esty_ci, fisher_alpha, gini_index, goods_coverage, heip_e, kempton_taylor_q, margalef, mcintosh_d, mcintosh_e, menhinick, michaelis_menten_fit, observed_species, osd, simpson_reciprocal, robbins, shannon, simpson, simpson_e, singles, strong, PD_whole_tree
+
+## Compute alpha diversity
+alpha_rarefaction.py -i otus97/otu_table.biom -m map.txt -o alpha_diversity -p alpha_params.txt -t otus97/rep_set.tre
+
+## Compute beta diversity. Change -e to the lowest number you obtained in “otus97/otu_table_biom_summary.txt”
+beta_diversity_through_plots.py -i otus97/otu_table.biom -m map.txt -o otus97/bdiversity_even146 -t otus97/rep_set.tre -e 146
